@@ -1,4 +1,5 @@
 from collections import defaultdict
+import re
 
 
 class Reference(object):
@@ -30,6 +31,33 @@ class Reference(object):
             return cls(string)
 
 
+class Relationship(object):
+    def __init__(self, predicate, accession, comment=None):
+        self.predicate = predicate
+        self.accession = accession
+        self.comment = comment
+
+    def __eq__(self, other):
+        try:
+            return self.accession == other.accession
+        except AttributeError:
+            return self.accession == other
+
+    def __ne__(self, other):
+        return not (self.accession == other.accession)
+
+    def __repr__(self):
+        return "%s ! %s" % (self.accession, self.comment)
+
+    def __hash__(self):
+        return hash(self.accession)
+
+    @classmethod
+    def fromstring(cls, string):
+        groups = re.search(r"(?P<predicate>\S+):?\s(?P<accession>\S+)\s(?:!\s(.*))", string).groupdict()
+        return cls(**groups)
+
+
 class OBOParser(object):
     def __init__(self, handle):
         self.handle = handle
@@ -48,6 +76,15 @@ class OBOParser(object):
             else:
                 is_as = map(Reference.fromstring, is_as)
             entity['is_a'] = is_as
+        except KeyError:
+            pass
+        try:
+            relationships = entity['relationship']
+            if not isinstance(relationships, list):
+                relationships = [relationships]
+            relationships = [Relationship.fromstring(r) for r in relationships]
+            for rel in relationships:
+                entity[rel.predicate] = rel
         except KeyError:
             pass
         self.terms[entity['id']] = entity
@@ -78,3 +115,34 @@ class OBOParser(object):
 
     def __iter__(self):
         return iter(self.terms.items())
+
+
+class ControlledVocabulary(object):
+    @classmethod
+    def from_obo(cls, handle):
+        parser = OBOParser(handle)
+        return cls(parser.terms)
+
+    def __init__(self, terms):
+        self.terms = terms
+        self._names = {
+            v['name']: v for v in terms.values()
+        }
+
+    def __getitem__(self, key):
+        try:
+            return self.terms[key]
+        except KeyError:
+            return self._names[key]
+
+    def __iter__(self):
+        return iter(self.terms)
+
+    def keys(self):
+        return self.terms.keys()
+
+    def names(self):
+        return self._names.keys()
+
+    def items(self):
+        return self.terms.items()

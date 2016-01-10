@@ -198,7 +198,7 @@ class CV(TagBase):
     def load(self):
         fp = urlopen(self.uri)
         if fp.getcode() == 200:
-            return obo_parser.OBOParser(fp)
+            return obo_parser.ControlledVocabulary.from_obo(fp)
         else:
             raise ValueError("%s did not resolve" % self.uri)
 
@@ -328,6 +328,27 @@ class ComponentDispatcher(object):
         component = ChildTrackingMeta._cache[name]
         return ReprBorrowingPartial(component, context=self.context)
 
+    def register(self, entity_type, id):
+        """
+        Pre-declare an entity in the document context. Ensures that
+        a reference look up will be satisfied.
+        
+        Parameters
+        ----------
+        entity_type : str
+            An entity type, either a tag name or a component name
+        id : int
+            The unique id number for the thing registered
+        
+        Returns
+        -------
+        str
+            The constructed reference id
+        """
+        value = id_maker(entity_type, id)
+        self.context[entity_type][id] = value
+        return value
+
 # ------------------------------------------
 # Base Component Definitions
 
@@ -428,7 +449,7 @@ class Inputs(GenericCollection):
 
 
 class DBSequence(ComponentBase):
-    def __init__(self, accession, sequence, protein_id, search_database_id, context=NullMap):
+    def __init__(self, accession, sequence, protein_id, search_database_id=1, context=NullMap):
         self.sequence = sequence
         self.search_database_ref = context['SearchDatabase'][search_database_id]
         self.element = _element(
@@ -762,27 +783,3 @@ class AuditCollection(ComponentBase):
                 person.write(xml_file)
             for organization in self.organizations:
                 organization.write(xml_file)
-
-
-# ----------------------
-# Order of Instantiation
-# Providence -> Input -> Protocol -> Identification
-
-def generate_mzidentml(outfile, software=None, owner=None, organization=None):
-    context = DocumentContext()
-    if software is None:
-        software = [AnalysisSoftware("Generic Analysis Software", context=context)]
-    if owner is None:
-        owner = Person(context=context)
-    if organization is None:
-        organization = Organization(context=context)
-
-    with etree.xmlfile(outfile) as xf:
-        with element(xf, "MzIdentML"):
-            GenericCollection("AnalysisSoftwareList", software, context=context).write(xf)
-            Provider(contact=owner.id, context=context).write(xf)
-            AuditCollection([owner], [organization], context=context).write(xf)
-
-
-if __name__ == '__main__':
-    generate_mzidentml(open("test.mzid", 'wb'))

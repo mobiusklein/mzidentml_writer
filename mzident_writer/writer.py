@@ -16,13 +16,56 @@ def ensure_iterable(obj):
     return obj
 
 
-class DocumentSection(ComponentDispatcher):
-    def __init__(self, writer, parent_context):
+class XMLWriterMixin(object):
+
+    @contextmanager
+    def element(self, element_name, **kwargs):
+        try:
+            with element(self.writer, element_name, **kwargs):
+                yield
+        except AttributeError:
+            if self.writer is None:
+                raise ValueError("This writer has not yet been created."
+                    " Make sure to use this object as a context manager using the "
+                    "`with` notation or by explicitly calling its __enter__ and "
+                    "__exit__ methods.")
+            else:
+                raise
+
+    def write(self, *args, **kwargs):
+        try:
+            self.writer.write(*args, **kwargs)
+        except AttributeError:
+            if self.writer is None:
+                raise ValueError("This writer has not yet been created."
+                    " Make sure to use this object as a context manager using the "
+                    "`with` notation or by explicitly calling its __enter__ and "
+                    "__exit__ methods.")
+            else:
+                raise
+
+
+class DocumentSection(ComponentDispatcher, XMLWriterMixin):
+    def __init__(self, section, writer, parent_context):
         super(DocumentSection, self).__init__(parent_context)
+        self.section = section
         self.writer = writer
 
+    def __enter__(self):
+        self.toplevel = element(self.writer, self.section)
+        self.toplevel.__enter__()
 
-class MzIdentMLWriter(ComponentDispatcher):
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.toplevel.__exit__(exc_type, exc_value, traceback)
+        self.writer.flush()
+
+
+# ----------------------
+# Order of Instantiation
+# Providence -> Input -> Protocol -> Identification
+
+
+class MzIdentMLWriter(ComponentDispatcher, XMLWriterMixin):
     """
     A high level API for generating MzIdentML XML files from simple Python objects.
 
@@ -54,6 +97,8 @@ class MzIdentMLWriter(ComponentDispatcher):
         super(MzIdentMLWriter, self).__init__()
         self.outfile = outfile
         self.xmlfile = etree.xmlfile(outfile, **kwargs)
+        self.writer = None
+        self.toplevel = None
 
     def _begin(self):
         self.writer = self.xmlfile.__enter__()
@@ -71,35 +116,6 @@ class MzIdentMLWriter(ComponentDispatcher):
 
     def close(self):
         self.outfile.close()
-
-    @contextmanager
-    def element(self, element_name, **kwargs):
-        with element(self.writer, element_name, **kwargs):
-            yield
-
-    def write(self, *args, **kwargs):
-        self.writer.write(*args, **kwargs)
-
-    def register(self, entity_type, id):
-        """
-        Pre-declare an entity in the document context. Ensures that
-        a reference look up will be satisfied.
-        
-        Parameters
-        ----------
-        entity_type : str
-            An entity type, either a tag name or a component name
-        id : int
-            The unique id number for the thing registered
-        
-        Returns
-        -------
-        str
-            The constructed reference id
-        """
-        value = id_maker(entity_type, id)
-        self.context[entity_type][id] = value
-        return value
 
     def providence(self, software=tuple(), owner=None, organization=None):
         """
