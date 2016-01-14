@@ -1,5 +1,9 @@
-from collections import defaultdict
+import os
 import re
+
+from collections import defaultdict
+from urllib2 import urlopen
+
 
 
 class Reference(object):
@@ -54,7 +58,7 @@ class Relationship(object):
 
     @classmethod
     def fromstring(cls, string):
-        groups = re.search(r"(?P<predicate>\S+):?\s(?P<accession>\S+)\s(?:!\s(.*))", string).groupdict()
+        groups = re.search(r"(?P<predicate>\S+):?\s(?P<accession>\S+)\s(?:!\s(?P<comment>.*))", string).groupdict()
         return cls(**groups)
 
 
@@ -123,17 +127,25 @@ class ControlledVocabulary(object):
         parser = OBOParser(handle)
         return cls(parser.terms)
 
-    def __init__(self, terms):
+    def __init__(self, terms, id=None):
         self.terms = terms
         self._names = {
             v['name']: v for v in terms.values()
         }
+        self._normalized = {
+            v['name'].lower(): v['name']
+            for v in terms.values()
+        }
+        self.id = id
 
     def __getitem__(self, key):
         try:
             return self.terms[key]
-        except KeyError:
-            return self._names[key]
+        except KeyError, e:
+            try:
+                return self._names[key]
+            except KeyError:
+                return self._names[self.normalize_name(key)]
 
     def __iter__(self):
         return iter(self.terms)
@@ -146,3 +158,42 @@ class ControlledVocabulary(object):
 
     def items(self):
         return self.terms.items()
+
+    def normalize_name(self, name):
+        return self._normalized[name.lower()]
+
+
+class OBOCache(object):
+    def __init__(self, cache_path='.obo_cache', enabled=True):
+        self.cache_path = cache_path
+        self.cache_exists = os.path.exists(cache_path)
+        self.enabled = enabled
+
+    def path_for(self, name):
+        if not self.cache_exists:
+            os.makedirs(self.cache_path)
+            self.cache_exists = True
+        name = os.path.basename(name)
+        if not name.endswith(".obo"):
+            name += '.obo'
+        return os.path.join(self.cache_path, name)
+
+    def resolve(self, uri):
+        if self.enabled:
+            name = self.path_for(uri)
+            if os.path.exists(name):
+                return open(name)
+            else:
+                f = urlopen(uri)
+                if f.getcode() != 200:
+                    raise ValueError("%s did not resolve" % uri)
+                with open(name, 'wb') as cache_f:
+                    for line in f:
+                        cache_f.write(line)
+                return open(name)
+        else:
+            return urlopen(uri)
+
+obo_cache = OBOCache()
+
+

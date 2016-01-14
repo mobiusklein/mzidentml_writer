@@ -3,10 +3,10 @@ import warnings
 from datetime import datetime
 from urllib2 import urlopen
 from numbers import Number as NumberBase
-
+from itertools import chain
 from functools import partial
 
-import obo_parser
+import controlled_vocabulary
 
 from lxml import etree
 
@@ -107,10 +107,14 @@ class TagBase(object):
         else:
             return xml_file.element(self.tag_name, **attrs)
 
-    __call__ = write = element
+    def write(self, xml_file, with_id=False):
+        el = self.element(with_id=with_id)
+        xml_file.write(el)
+
+    __call__ = element
 
     def __repr__(self):
-        return etree.tostring(self.element(with_id=True))
+        return "<%s id=\"%s\" %s>" % (self.tag_name, self.id, " ".join("%s=\"%s\"" % (k, str(v)) for k, v in self.attrs.items()))
 
     def __eq__(self, other):
         try:
@@ -147,22 +151,32 @@ class CVParam(TagBase):
     @classmethod
     def param(cls, name, value=None):
         if isinstance(name, cls):
-            return cls.element
+            return name.write
         else:
             if value is None:
-                return cls(name=name).element
+                return cls(name=name).write
             else:
-                return cls(name=name, value=value).element
+                return cls(name=name, value=value).write
 
-    def __init__(self, accession=None, name=None, ref=None, **attrs):
+    def __init__(self, accession=None, name=None, ref=None, value=None, **attrs):
         if ref is not None:
             attrs["cvRef"] = ref
         if accession is not None:
             attrs["accession"] = accession
         if name is not None:
             attrs["name"] = name
+        if value is not None:
+            attrs['value'] = value
         super(CVParam, self).__init__(self.tag_name, **attrs)
         self.patch_accession(accession, ref)
+
+    @property
+    def value(self):
+        return self.attrs.get("value")
+
+    @value.setter
+    def value(self, value):
+        self.attrs['value'] = value
 
     @property
     def ref(self):
@@ -175,6 +189,9 @@ class CVParam(TagBase):
     @property
     def accession(self):
         return self.attrs['accession']
+
+    def __call__(self, *args, **kwargs):
+        self.write(*args, **kwargs)
 
     def patch_accession(self, accession, ref):
         if accession is not None:
@@ -194,13 +211,24 @@ class CV(TagBase):
 
     def __init__(self, id, uri, **kwargs):
         super(CV, self).__init__(id=id, uri=uri, **kwargs)
+        self._vocabulary = None
 
-    def load(self):
-        fp = urlopen(self.uri)
-        if fp.getcode() == 200:
-            return obo_parser.ControlledVocabulary.from_obo(fp)
+    def load(self, handle=None):
+        if handle is None:
+            fp = controlled_vocabulary.obo_cache.resolve(self.uri)
+            cv = controlled_vocabulary.ControlledVocabulary.from_obo(fp)
         else:
-            raise ValueError("%s did not resolve" % self.uri)
+            cv = controlled_vocabulary.ControlledVocabulary.from_obo(handle)
+        try:
+            cv.id = self.id
+        except:
+            pass
+        return cv
+
+    def __getitem__(self, key):
+        if self._vocabulary is None:
+            self._vocabulary = self.load()
+        return self._vocabulary[key]
 
 
 def _make_tag_type(name, **attrs):
@@ -230,11 +258,11 @@ default_cv_list = [
         uri=("http://psidev.cvs.sourceforge.net/viewvc/*checkout*/psidev"
              "/psi/psi-ms/mzML/controlledVocabulary/psi-ms.obo"),
         version="2.25.0", fullName="PSI-MS"),
-    _element("cv", id="UNIMOD", uri="http://www.unimod.org/obo/unimod.obo", fullName="UNIMOD"),
     _element(
         "cv", id="UO",
         uri="http://obo.cvs.sourceforge.net/*checkout*/obo/obo/ontology/phenotype/unit.obo",
-        fullName="UNIT-ONTOLOGY")
+        fullName="UNIT-ONTOLOGY"),
+    _element("cv", id="UNIMOD", uri="http://www.unimod.org/obo/unimod.obo", fullName="UNIMOD")
 ]
 
 
@@ -262,7 +290,7 @@ class SpecializedContextCache(dict):
             item = dict.__getitem__(self, key)
             return item
         except KeyError:
-            warnings.warn("No reference was found for %d in %s" % (key, self.type_name))
+            warnings.warn("No reference was found for %d in %s" % (key, self.type_name), stacklevel=3)
             new_value = id_maker(self.type_name, key)
             self[key] = new_value
             return new_value
@@ -271,7 +299,46 @@ class SpecializedContextCache(dict):
         return '%s\n%s' % (self.type_name, dict.__repr__(self))
 
 
-class DocumentContext(dict):
+class VocabularyResolver(object):
+    def __init__(self, vocabularies=None):
+        if vocabularies is None:
+            vocabularies = default_cv_list
+        self.vocabularies = vocabularies
+
+    def param(self, name, value=None, cv_ref=None, **kwargs):
+        accession = kwargs.get("accession")
+        if isinstance(name, CVParam):
+            return name
+        else:
+            if cv_ref is None:
+                for cv in self.vocabularies:
+                    try:
+                        term = cv[name]
+                        name = term["name"]
+                        accession = term["id"]
+                        cv_ref = cv.id
+                    except:
+                        pass
+            if cv_ref is None:
+                return UserParam(name=name, value=value, **kwargs)
+            else:
+                return CVParam(name=name, accession=accession, value=value, ref=cv_ref, **kwargs)
+
+    def term(self, name):
+        for cv in self.vocabularies:
+            try:
+                term = cv[name]
+                return term
+            except:
+                pass
+        else:
+            raise KeyError(name)
+
+class DocumentContext(dict, VocabularyResolver):
+    def __init__(self, vocabularies=None):
+        dict.__init__(self)
+        VocabularyResolver.__init__(self, vocabularies)
+
     def __missing__(self, key):
         self[key] = SpecializedContextCache(key)
         return self[key]
@@ -303,9 +370,12 @@ class ComponentDispatcher(object):
         The mapping responsible for managing the global
         state of all created components.
     """
-    def __init__(self, context=None):
+    def __init__(self, context=None, vocabularies=None):
         if context is None:
-            context = DocumentContext()
+            context = DocumentContext(vocabularies=vocabularies)
+        else:
+            if vocabularies is not None:
+                context.vocabularies.extend(vocabularies)
         self.context = context
 
     def __getattr__(self, name):
@@ -349,6 +419,16 @@ class ComponentDispatcher(object):
         self.context[entity_type][id] = value
         return value
 
+    @property
+    def vocabularies(self):
+        return self.context.vocabularies
+    
+    def param(self, *args, **kwargs):
+        return self.context.param(*args, **kwargs)
+
+    def term(self, *args, **kwargs):
+        return self.context.term(*args, **kwargs)
+
 # ------------------------------------------
 # Base Component Definitions
 
@@ -360,10 +440,16 @@ class ComponentBase(object):
         pass
 
     def __getattr__(self, key):
-        return self.element.attrs[key]
+        try:
+            return self.element.attrs[key]
+        except KeyError:
+            raise AttributeError(key)
 
     def write(self, xml_file):
         raise NotImplementedError()
+
+    def __call__(self, xml_file):
+        self.write(xml_file)
 
 
 class GenericCollection(ComponentBase):
@@ -398,12 +484,13 @@ class SourceFile(ComponentBase):
     def __init__(self, location, file_format, id=None, context=NullMap):
         self.file_format = file_format
         self.element = _element("SourceFile", location=location, id=id)
+        self.context = context
         context["SourceFile"][id] = self.element.id
 
     def write(self, xml_file):
         with self.element.element(xml_file, with_id=True):
             with element(xml_file, "FileFormat"):
-                CVParam.param(self.file_format)(xml_file)
+                self.context.param(self.file_format)(xml_file)
 
 
 class SearchDatabase(ComponentBase):
@@ -412,13 +499,15 @@ class SearchDatabase(ComponentBase):
         self.file_format = file_format
         self.element = _element("SearchDatabase", location=location, name=name, id=id)
         context["SearchDatabase"][id] = self.element.id
+        self.context = context
+
 
     def write(self, xml_file):
         with self.element.element(xml_file, with_id=True):
             with element(xml_file, "FileFormat"):
-                CVParam.param(self.file_format)(xml_file)
+                self.context.param(self.file_format)(xml_file)
             with element(xml_file, "DatabaseName"):
-                UserParam(name=self.name).element(xml_file)
+                UserParam(name=self.name).write(xml_file)
 
 
 class SpectraData(ComponentBase):
@@ -427,13 +516,14 @@ class SpectraData(ComponentBase):
         self.spectrum_id_format = spectrum_id_format
         self.element = _element("SpectraData", id=id, location=location)
         context['SpectraData'][id] = self.element.id
+        self.context = context
 
     def write(self, xml_file):
         with self.element.element(xml_file, with_id=True):
             with element(xml_file, "FileFormat"):
-                CVParam.param(self.file_format)(xml_file)
+                self.context.param(self.file_format)(xml_file)
             with element(xml_file, "SpectrumIDFormat"):
-                CVParam.param(self.spectrum_id_format)(xml_file)
+                self.context.param(self.spectrum_id_format)(xml_file)
 
 
 class Inputs(GenericCollection):
@@ -449,14 +539,14 @@ class Inputs(GenericCollection):
 
 
 class DBSequence(ComponentBase):
-    def __init__(self, accession, sequence, protein_id, search_database_id=1, context=NullMap):
+    def __init__(self, accession, sequence, id, search_database_id=1, context=NullMap):
         self.sequence = sequence
         self.search_database_ref = context['SearchDatabase'][search_database_id]
         self.element = _element(
-            "DBSequence", accession=accession, id=protein_id,
+            "DBSequence", accession=accession, id=id,
             length=len(sequence), searchDatabase_ref=self.search_database_ref)
 
-        context["DBSequence"][protein_id] = self.element.id
+        context["DBSequence"][id] = self.element.id
 
     def write(self, xml_file):
         protein = self.sequence
@@ -466,12 +556,11 @@ class DBSequence(ComponentBase):
 
 
 class Peptide(ComponentBase):
-    def __init__(self, peptide_sequence, peptide_id, modifications=tuple(), context=NullMap):
+    def __init__(self, peptide_sequence, id, modifications=tuple(), context=NullMap):
         self.peptide_sequence = peptide_sequence
-        self.peptide_id = peptide_id
         self.modifications = modifications
-        self.element = _element("Peptide", id=peptide_id)
-        context["Peptide"][peptide_id] = self.element.id
+        self.element = _element("Peptide", id=id)
+        context["Peptide"][id] = self.element.id
 
     def write(self, xml_file):
         with self.element.element(xml_file, with_id=True):
@@ -482,19 +571,19 @@ class Peptide(ComponentBase):
 
 
 class PeptideEvidence(ComponentBase):
-    def __init__(self, peptide_id, protein_id, start_position, end_position,
+    def __init__(self, peptide_id, db_sequence_id, id, start_position, end_position,
                  is_decoy=False, pre='', post='', context=NullMap):
         self.peptide_id = peptide_id
-        self.protein_id = protein_id
+        self.db_sequence_id = db_sequence_id
         self.element = _element(
             "PeptideEvidence", isDecoy=is_decoy, start=start_position,
             end=end_position, peptide_ref=context["Peptide"][peptide_id],
-            dBSequence_ref=context['DBSequence'][protein_id],
-            pre=pre, post=post)
-        context["PeptideEvidence"][peptide_id, protein_id] = self.element.id
+            dBSequence_ref=context['DBSequence'][db_sequence_id],
+            pre=pre, post=post, id=id)
+        context["PeptideEvidence"][id] = self.element.id
 
     def write(self, xml_file):
-        xml_file.write(self.element.element(with_id=True))
+        xml_file.write(self.element(with_id=True))
 
 
 class SpectrumIdentificationResult(ComponentBase):
@@ -524,16 +613,20 @@ class SpectrumIdentificationItem(ComponentBase):
             peptide_ref=context['Peptide'][peptide_id]
             )
         context['SpectrumIdentificationItem'][id] = self.element.id
+        self.context = context
 
     def write(self, xml_file):
         with self.element.element(xml_file, with_id=True):
-            element(xml_file, "PeptideEvidenceRef", peptideEvidence_ref=self.peptide_evidence_ref)
+            _element(
+                "PeptideEvidenceRef",
+                peptideEvidence_ref=self.peptide_evidence_ref).write(
+                xml_file)
             if isinstance(self.score, CVParam):
-                self.score.element(xml_file)
+                self.score.write(xml_file)
             else:
-                CVParam(name="score", value=self.score).element(xml_file)
+                self.context.param(name="score", value=self.score)(xml_file)
             for cvp in self.cv_params:
-                cvp.element(xml_file)
+                self.context.param(cvp)(xml_file)
 
 
 class SpectrumIdentificationList(IDGenericCollection):
@@ -559,6 +652,12 @@ class DataCollection(GenericCollection):
         super(DataCollection, self).__init__("DataCollection", [inputs, analysis_data], context)
 
 
+class SequenceCollection(GenericCollection):
+    def __init__(self, db_sequences, peptides, peptide_evidence, context=NullMap):
+        super(SequenceCollection, self).__init__("SequenceCollection", chain.from_iterable(
+            [db_sequences, peptides, peptide_evidence]))
+
+
 # --------------------------------------------------
 # Software Execution Protocol Information
 
@@ -566,24 +665,35 @@ class DataCollection(GenericCollection):
 class Enzyme(ComponentBase):
     def __init__(self, name, missed_cleavages=1, id=None, semi_specific=False, site_regexp=None, context=NullMap):
         self.name = name
+        if site_regexp is None:
+            term = context.term(name)
+            try:
+                regex_ref = term['has_regexp']
+                regex_ent = context.term(regex_ref)
+                regex = regex_ent['name']
+                site_regexp = regex
+            except:
+                pass
         self.site_regexp = site_regexp
         self.element = _element(
             "Enzyme", semiSpecific=semi_specific, missedCleavages=missed_cleavages,
             id=id)
         context["Enzyme"][id] = self.element.id
+        self.context = context
 
     def write(self, xml_file):
         with self.element.element(xml_file, with_id=True):
             if self.site_regexp is not None:
-                with element(xml_file, "SiteRegexp"):
-                    xml_file.write(etree.CDATA(self.site_regexp))
+                regex = _element("SiteRegexp")
+                regex.text = etree.CDATA(self.site_regexp)
+                regex.write(xml_file)
             with element(xml_file, "EnzymeName"):
-                CVParam.param(self.name)(xml_file)
+                self.context.param(self.name)(xml_file)
 
 
 class _Tolerance(ComponentBase):
 
-    def __init__(self, low, high=None, context=NullMap, unit="parts per million"):
+    def __init__(self, low, high=None, unit="parts per million", context=NullMap):
         if isinstance(low, NumberBase):
             low = CVParam(
                 accession="MS:1001413", ref="PSI-MS", unitCvRef="UO", unitName=unit,
@@ -592,7 +702,7 @@ class _Tolerance(ComponentBase):
         if high is None:
             high = CVParam(
                 accession="MS:1001412", ref="PSI-MS", unitCvRef="UO", unitName=unit,
-                unitAccession=common_units[unit], value=low,
+                unitAccession=common_units[unit], value=low.value,
                 name="search tolerance plus value")
         elif isinstance(high, NumberBase):
             high = CVParam(
@@ -624,10 +734,11 @@ class Threshold(ComponentBase):
         if name is None:
             name = self.no_threshold
         self.name = name
+        self.context = context
 
     def write(self, xml_file):
         with element(xml_file, "Threshold"):
-            CVParam.param(self.name)(xml_file)
+            self.context.param(self.name)(xml_file)
 
 
 class SpectrumIdentificationProtocol(ComponentBase):
@@ -649,13 +760,16 @@ class SpectrumIdentificationProtocol(ComponentBase):
             analysisSoftware_ref=context['AnalysisSoftware'][analysis_software_id])
         context["SpectrumIdentificationProtocol"][id] = self.element.id
 
+        self.context = context
+
     def write(self, xml_file):
         with self.element.element(xml_file, with_id=True):
+        # with xml_file.element("SpectrumIdentificationProtocol", analysisSoftware_ref=self.analysisSoftware_ref, id=self.element.id):
             with element(xml_file, "SearchType"):
-                CVParam.param(self.search_type)(xml_file)
+                self.context.param(self.search_type)(xml_file)
             with element(xml_file, "AdditionalSearchParams"):
                 for search_param in self.additional_search_params:
-                    CVParam.param(search_param)(xml_file)
+                    self.contex.param(search_param)(xml_file)
             with element(xml_file, "ModificationParams"):
                 for mod in self.modification_params:
                     mod.write(xml_file)
@@ -694,6 +808,31 @@ class AnalysisProtocolCollection(GenericCollection):
 
 
 # --------------------------------------------------
+# Analysis Collection - Data-to-Analysis
+
+class SpectrumIdentification(ComponentBase):
+    def __init__(self, spectra_data_ids_used=None, search_database_ids_used=None, spectrum_identification_list_id=1,
+                 spectrum_identification_protocol_id=1, id=1, context=NullMap):
+        self.spectra_data_ids_used = [context["SpectraData"][x] for x in (spectra_data_ids_used or [])]
+        self.search_database_ids_used = [context["SpectraData"][x] for x in (search_database_ids_used or [])]
+
+        self.element = _element(
+            "SpectrumIdentification", id=id,
+            spectrumIdentificationList_ref=context["SpectrumIdentificationList"][
+                spectrum_identification_list_id],
+            spectrumIdentificationProtocol_ref=context["SpectrumIdentificationProtocol"][
+                spectrum_identification_protocol_id])
+        context["SpectrumIdentification"] = self.element.id
+
+    def write(self, xml_file):
+        with self.element(xml_file, with_id=True):
+            for spectra_data_id in self.spectra_data_ids_used:
+                _element("InputSpectra", spectraData_ref=spectra_data_id).write(xml_file)
+            for spearch_database_id in self.search_database_ids_used:
+                _element("SearchDatabaseRef", searchDatabase_ref=spectra_data_id).write(xml_file)
+
+
+# --------------------------------------------------
 # Misc. Providence Management
 
 
@@ -701,12 +840,16 @@ DEFAULT_CONTACT_ID = "PERSON_DOC_OWNER"
 DEFAULT_ORGANIZATION_ID = "ORG_DOC_OWNER"
 
 
-class CVListComponent(GenericCollection):
+class CVList(ComponentBase):
     def __init__(self, cv_list=None, context=NullMap):
         if cv_list is None:
             cv_list = default_cv_list
-        super(CVListComponent, self).__init__("cvList", cv_list)
         self.cv_list = cv_list
+
+    def write(self, xml_file):
+        with element(xml_file, 'cvList'):
+            for member in self.cv_list:
+                xml_file.write(member.element(with_id=True))
 
 
 class AnalysisSoftware(ComponentBase):

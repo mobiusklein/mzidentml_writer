@@ -2,7 +2,7 @@ from collections import Iterable, Mapping
 from contextlib import contextmanager
 from .components import (
     ComponentDispatcher, etree, common_units, element, _element,
-    id_maker)
+    id_maker, default_cv_list, CVParam, UserParam)
 
 try:
     basestring
@@ -16,13 +16,20 @@ def ensure_iterable(obj):
     return obj
 
 
+_t = tuple()
+
+
 class XMLWriterMixin(object):
 
     @contextmanager
     def element(self, element_name, **kwargs):
         try:
-            with element(self.writer, element_name, **kwargs):
-                yield
+            if isinstance(element_name, basestring):
+                with element(self.writer, element_name, **kwargs):
+                    yield
+            else:
+                with element_name.element(self.writer, **kwargs):
+                    yield
         except AttributeError:
             if self.writer is None:
                 raise ValueError("This writer has not yet been created."
@@ -78,7 +85,7 @@ class MzIdentMLWriter(ComponentDispatcher, XMLWriterMixin):
     MzIdentMLWriter inherits from :class:`.ComponentDispatcher`, giving it a :attr:`context`
     attribute and access to all `Component` objects pre-bound to that context with attribute-access
     notation.
-    
+
     Attributes
     ----------
     outfile : file
@@ -93,8 +100,8 @@ class MzIdentMLWriter(ComponentDispatcher, XMLWriterMixin):
         of file generation. Kept to control context
     context : :class:`.DocumentContext`
     """
-    def __init__(self, outfile, **kwargs):
-        super(MzIdentMLWriter, self).__init__()
+    def __init__(self, outfile, vocabularies=None, **kwargs):
+        super(MzIdentMLWriter, self).__init__(vocabularies)
         self.outfile = outfile
         self.xmlfile = etree.xmlfile(outfile, **kwargs)
         self.writer = None
@@ -116,6 +123,13 @@ class MzIdentMLWriter(ComponentDispatcher, XMLWriterMixin):
 
     def close(self):
         self.outfile.close()
+
+    def controlled_vocabularies(self, vocabularies=None):
+        if vocabularies is None:
+            vocabularies = []
+        self.vocabularies.extend(vocabularies)
+        cvlist = self.CVList(self.vocabularies)
+        cvlist.write(self.writer)
 
     def providence(self, software=tuple(), owner=None, organization=None):
         """
@@ -142,9 +156,9 @@ class MzIdentMLWriter(ComponentDispatcher, XMLWriterMixin):
         self.AuditCollection([owner], [organization]).write(self.writer)
 
     def inputs(self, source_files=tuple(), search_databases=tuple(), spectra_data=tuple()):
-        source_files = [self.SourceFile(**(s or {})) for s in source_files]
-        search_databases = [self.SearchDatabase(**(s or {})) for s in search_databases]
-        spectra_data = [self.SpectraData(**(s or {})) for s in spectra_data]
+        source_files = [self.SourceFile(**(s or {})) for s in ensure_iterable(source_files)]
+        search_databases = [self.SearchDatabase(**(s or {})) for s in ensure_iterable(search_databases)]
+        spectra_data = [self.SpectraData(**(s or {})) for s in ensure_iterable(spectra_data)]
 
         self.Inputs(source_files, search_databases, spectra_data).write(self.writer)
 
@@ -152,3 +166,38 @@ class MzIdentMLWriter(ComponentDispatcher, XMLWriterMixin):
         db_sequences = (self.DBSequence(**(s or {})) for s in ensure_iterable(db_sequences))
         peptides = (self.Peptide(**(s or {})) for s in ensure_iterable(peptides))
         peptide_evidence = (self.PeptideEvidence(**(s or {})) for s in ensure_iterable(peptide_evidence))
+
+        self.SequenceCollection(db_sequences, peptides, peptide_evidence).write(self.writer)
+
+    def spectrum_identification_protocol(self, search_type='ms-ms search', analysis_software_id=1, id=1, additional_search_params=_t,
+                                         enzymes=_t, modification_params=_t, fragment_tolerance=None,
+                                         parent_tolerance=None, threshold=None):
+        enzymes = [self.Enzyme(**(s or {})) for s in ensure_iterable(enzymes)]
+        modification_params = [self.SearchModification(**(s or {})) for s in  ensure_iterable(modification_params)]
+        if isinstance(fragment_tolerance, (list, tuple)):
+            fragment_tolerance = self.FragmentTolerance(*fragment_tolerance)
+        if isinstance(parent_tolerance, (list, tuple)):
+            parent_tolerance = self.ParentTolerance(*parent_tolerance)
+        threshold = self.Threshold(threshold)
+        protocol = self.SpectrumIdentificationProtocol(
+            search_type, analysis_software_id, id, additional_search_params, enzymes, modification_params,
+            fragment_tolerance, parent_tolerance, threshold)
+        protocol.write(self.writer)
+
+    def spectrum_identification_list(self, id, identification_results=_t):
+        converting = (self._spectrum_identification_result(**(s or {})) for s in identification_results)
+        self.SpectrumIdentificationList(id=id, identification_results=converting).write(self.writer)
+
+    def _spectrum_identification_result(self, spectrum_id, id, spectra_data_id=1, identifications=_t):
+        return self.SpectrumIdentificationResult(
+            spectra_data_id=spectra_data_id,
+            spectrum_id=spectrum_id,
+            id=id,
+            identifications=[self._spectrum_identification_item(**(s or {})) for s in ensure_iterable(identifications)])
+
+    def _spectrum_identification_item(self, calculated_mass_to_charge, experimental_mass_to_charge,
+                             charge_state, peptide_id, peptide_evidence_id, score, id, cv_params=_t,
+                             pass_threshold=True, rank=1):
+            return self.SpectrumIdentificationItem(calculated_mass_to_charge, experimental_mass_to_charge,
+                             charge_state, peptide_id, peptide_evidence_id, score, id, cv_params=ensure_iterable(cv_params),
+                             pass_threshold=pass_threshold, rank=rank)
