@@ -32,7 +32,8 @@ class XMLWriterMixin(object):
                     yield
         except AttributeError:
             if self.writer is None:
-                raise ValueError("This writer has not yet been created."
+                raise ValueError(
+                    "This writer has not yet been created."
                     " Make sure to use this object as a context manager using the "
                     "`with` notation or by explicitly calling its __enter__ and "
                     "__exit__ methods.")
@@ -44,7 +45,8 @@ class XMLWriterMixin(object):
             self.writer.write(*args, **kwargs)
         except AttributeError:
             if self.writer is None:
-                raise ValueError("This writer has not yet been created."
+                raise ValueError(
+                    "This writer has not yet been created."
                     " Make sure to use this object as a context manager using the "
                     "`with` notation or by explicitly calling its __enter__ and "
                     "__exit__ methods.")
@@ -137,7 +139,7 @@ class MzIdentMLWriter(ComponentDispatcher, XMLWriterMixin):
 
         This section should be written early on to register the list of software used in this
         analysis
-        
+
         Parameters
         ----------
         software : dict or list of dict, optional
@@ -145,7 +147,8 @@ class MzIdentMLWriter(ComponentDispatcher, XMLWriterMixin):
         owner : dict, optional
             A dictionary specifying a :class:`Person` instance. If missing, a default person will be created
         organization : dict, optional
-            A dictionary specifying a :class:`Organization` instance. If missing, a default organization will be created
+            A dictionary specifying a :class:`Organization` instance. If missing, a default organization will
+            be created
         """
         software = [self.AnalysisSoftware(**(s or {})) for s in ensure_iterable(software)]
         owner = self.Person(**(owner or {}))
@@ -169,11 +172,11 @@ class MzIdentMLWriter(ComponentDispatcher, XMLWriterMixin):
 
         self.SequenceCollection(db_sequences, peptides, peptide_evidence).write(self.writer)
 
-    def spectrum_identification_protocol(self, search_type='ms-ms search', analysis_software_id=1, id=1, additional_search_params=_t,
-                                         enzymes=_t, modification_params=_t, fragment_tolerance=None,
-                                         parent_tolerance=None, threshold=None):
+    def spectrum_identification_protocol(self, search_type='ms-ms search', analysis_software_id=1, id=1,
+                                         additional_search_params=_t, enzymes=_t, modification_params=_t,
+                                         fragment_tolerance=None, parent_tolerance=None, threshold=None):
         enzymes = [self.Enzyme(**(s or {})) for s in ensure_iterable(enzymes)]
-        modification_params = [self.SearchModification(**(s or {})) for s in  ensure_iterable(modification_params)]
+        modification_params = [self.SearchModification(**(s or {})) for s in ensure_iterable(modification_params)]
         if isinstance(fragment_tolerance, (list, tuple)):
             fragment_tolerance = self.FragmentTolerance(*fragment_tolerance)
         if isinstance(parent_tolerance, (list, tuple)):
@@ -193,11 +196,13 @@ class MzIdentMLWriter(ComponentDispatcher, XMLWriterMixin):
             spectra_data_id=spectra_data_id,
             spectrum_id=spectrum_id,
             id=id,
-            identifications=[self._spectrum_identification_item(**(s or {})) for s in ensure_iterable(identifications)])
+            identifications=[self._spectrum_identification_item(**(s or {}))
+                             for s in ensure_iterable(identifications)])
 
     def _spectrum_identification_item(self, calculated_mass_to_charge, experimental_mass_to_charge,
-                             charge_state, peptide_id, peptide_evidence_id, score, id, cv_params=_t,
-                             pass_threshold=True, rank=1):
-            return self.SpectrumIdentificationItem(calculated_mass_to_charge, experimental_mass_to_charge,
-                             charge_state, peptide_id, peptide_evidence_id, score, id, cv_params=ensure_iterable(cv_params),
-                             pass_threshold=pass_threshold, rank=rank)
+                                      charge_state, peptide_id, peptide_evidence_id, score, id, cv_params=_t,
+                                      pass_threshold=True, rank=1):
+            return self.SpectrumIdentificationItem(
+                calculated_mass_to_charge, experimental_mass_to_charge,
+                charge_state, peptide_id, peptide_evidence_id, score, id,
+                cv_params=ensure_iterable(cv_params), pass_threshold=pass_threshold, rank=rank)

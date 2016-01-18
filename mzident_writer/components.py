@@ -1,12 +1,12 @@
 import warnings
 
 from datetime import datetime
-from urllib2 import urlopen
 from numbers import Number as NumberBase
 from itertools import chain
 from functools import partial
 
-import controlled_vocabulary
+from . import controlled_vocabulary
+
 
 from lxml import etree
 
@@ -48,6 +48,9 @@ def id_maker(type_name, id_number):
     return "%s_%d" % (type_name.upper(), id_number)
 
 
+NO_TRACK = object()
+
+
 class CountedType(type):
     _cache = {}
 
@@ -55,6 +58,8 @@ class CountedType(type):
         new_type = type.__new__(cls, name, parents, attrs)
         tag_name = attrs.get("tag_name")
         new_type.counter = staticmethod(make_counter())
+        if attrs.get("_track") is NO_TRACK:
+            return new_type
         cls._cache[name] = new_type
         if tag_name is not None:
             cls._cache[tag_name] = new_type
@@ -114,7 +119,8 @@ class TagBase(object):
     __call__ = element
 
     def __repr__(self):
-        return "<%s id=\"%s\" %s>" % (self.tag_name, self.id, " ".join("%s=\"%s\"" % (k, str(v)) for k, v in self.attrs.items()))
+        return "<%s id=\"%s\" %s>" % (self.tag_name, self.id, " ".join("%s=\"%s\"" % (
+            k, str(v)) for k, v in self.attrs.items()))
 
     def __eq__(self, other):
         try:
@@ -231,6 +237,27 @@ class CV(TagBase):
         return self._vocabulary[key]
 
 
+class ProvidedCV(CV):
+    _track = NO_TRACK
+
+    def __init__(self, id, uri, **kwargs):
+        super(ProvidedCV, self).__init__(id, uri, **kwargs)
+        self._provider = None
+
+    def load(self, handle=None):
+        cv = controlled_vocabulary.obo_cache.resolve(self.uri)
+        try:
+            cv.id = self.id
+        except:
+            pass
+        return cv
+
+    def __getitem__(self, key):
+        if self._provider is None:
+            self._provider = self.load()
+        return self._provider[key]
+
+
 def _make_tag_type(name, **attrs):
     return type(name, (TagBase,), {"tag_name": name, "type_attrs": attrs})
 
@@ -262,7 +289,7 @@ default_cv_list = [
         "cv", id="UO",
         uri="http://obo.cvs.sourceforge.net/*checkout*/obo/obo/ontology/phenotype/unit.obo",
         fullName="UNIT-ONTOLOGY"),
-    _element("cv", id="UNIMOD", uri="http://www.unimod.org/obo/unimod.obo", fullName="UNIMOD")
+    ProvidedCV(id="UNIMOD", uri="http://www.unimod.org/obo/unimod.obo", fullName="UNIMOD")
 ]
 
 
@@ -334,6 +361,7 @@ class VocabularyResolver(object):
         else:
             raise KeyError(name)
 
+
 class DocumentContext(dict, VocabularyResolver):
     def __init__(self, vocabularies=None):
         dict.__init__(self)
@@ -363,7 +391,7 @@ class ComponentDispatcher(object):
     A container for a :class:`DocumentContext` which provides
     an automatically parameterized version of all :class:`ComponentBase`
     types which use this instance's context.
-    
+
     Attributes
     ----------
     context : :class:`DocumentContext`
@@ -383,12 +411,12 @@ class ComponentDispatcher(object):
         Provide access to an automatically parameterized
         version of all :class:`ComponentBase` types which
         use this instance's context.
-        
+
         Parameters
         ----------
         name : str
             Component Name
-        
+
         Returns
         -------
         ReprBorrowingPartial
@@ -402,14 +430,14 @@ class ComponentDispatcher(object):
         """
         Pre-declare an entity in the document context. Ensures that
         a reference look up will be satisfied.
-        
+
         Parameters
         ----------
         entity_type : str
             An entity type, either a tag name or a component name
         id : int
             The unique id number for the thing registered
-        
+
         Returns
         -------
         str
@@ -422,7 +450,7 @@ class ComponentDispatcher(object):
     @property
     def vocabularies(self):
         return self.context.vocabularies
-    
+
     def param(self, *args, **kwargs):
         return self.context.param(*args, **kwargs)
 
@@ -500,7 +528,6 @@ class SearchDatabase(ComponentBase):
         self.element = _element("SearchDatabase", location=location, name=name, id=id)
         context["SearchDatabase"][id] = self.element.id
         self.context = context
-
 
     def write(self, xml_file):
         with self.element.element(xml_file, with_id=True):
@@ -684,9 +711,9 @@ class Enzyme(ComponentBase):
     def write(self, xml_file):
         with self.element.element(xml_file, with_id=True):
             if self.site_regexp is not None:
-                regex = _element("SiteRegexp")
+                regex = _element("SiteRegexp").element()
                 regex.text = etree.CDATA(self.site_regexp)
-                regex.write(xml_file)
+                xml_file.write(regex)
             with element(xml_file, "EnzymeName"):
                 self.context.param(self.name)(xml_file)
 
@@ -763,8 +790,7 @@ class SpectrumIdentificationProtocol(ComponentBase):
         self.context = context
 
     def write(self, xml_file):
-        with self.element.element(xml_file, with_id=True):
-        # with xml_file.element("SpectrumIdentificationProtocol", analysisSoftware_ref=self.analysisSoftware_ref, id=self.element.id):
+        with self.element(xml_file, with_id=True):
             with element(xml_file, "SearchType"):
                 self.context.param(self.search_type)(xml_file)
             with element(xml_file, "AdditionalSearchParams"):

@@ -3,7 +3,7 @@ import re
 
 from collections import defaultdict
 from urllib2 import urlopen
-
+from . import unimod
 
 
 class Reference(object):
@@ -145,7 +145,10 @@ class ControlledVocabulary(object):
             try:
                 return self._names[key]
             except KeyError:
-                return self._names[self.normalize_name(key)]
+                try:
+                    return self._names[self.normalize_name(key)]
+                except KeyError, e2:
+                    raise KeyError("%s and %s were not found." % (e, e2))
 
     def __iter__(self):
         return iter(self.terms)
@@ -164,21 +167,24 @@ class ControlledVocabulary(object):
 
 
 class OBOCache(object):
-    def __init__(self, cache_path='.obo_cache', enabled=True):
+    def __init__(self, cache_path='.obo_cache', enabled=True, resolvers=None):
         self.cache_path = cache_path
         self.cache_exists = os.path.exists(cache_path)
         self.enabled = enabled
+        self.resolvers = resolvers or {}
 
-    def path_for(self, name):
+    def path_for(self, name, setext=True):
         if not self.cache_exists:
             os.makedirs(self.cache_path)
             self.cache_exists = True
         name = os.path.basename(name)
-        if not name.endswith(".obo"):
+        if not name.endswith(".obo") and setext:
             name += '.obo'
         return os.path.join(self.cache_path, name)
 
     def resolve(self, uri):
+        if uri in self.resolvers:
+            return self.resolvers[uri](self)
         if self.enabled:
             name = self.path_for(uri)
             if os.path.exists(name):
@@ -194,6 +200,26 @@ class OBOCache(object):
         else:
             return urlopen(uri)
 
+    def set_resolver(self, uri, provider):
+        self.resolvers[uri] = provider
+
+    def __repr__(self):
+        return "OBOCache(cache_path=%r, enabled=%r, resolvers=%s)" % (
+            self.cache_path, self.enabled, self.resolvers)
+
+
+def _make_relative_sqlite_sqlalchemy_uri(path):
+    return "sqlite:///%s" % path
+
+
+def resolve_unimod(cache):
+    if cache.enabled:
+        path = _make_relative_sqlite_sqlalchemy_uri(
+            cache.path_for("unimod.db", False))
+        return unimod.Unimod(path)
+    else:
+        return unimod.Unimod()
+
+
 obo_cache = OBOCache()
-
-
+obo_cache.set_resolver("http://www.unimod.org/obo/unimod.obo", resolve_unimod)
